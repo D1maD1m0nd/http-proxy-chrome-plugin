@@ -1,0 +1,37 @@
+{
+  "name": "chrome-proxy-manager",
+  "displayName": "Chrome Proxy Manager",
+  "version": "0.1.0",
+  "description": "Chrome-only HTTP proxy manager with PAC routing and automatic proxy authentication.",
+  "author": "OpenAI Codex",
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "dev": "plasmo dev --src-path=.",
+    "build": "plasmo build --src-path=.",
+    "package": "plasmo package --src-path=.",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "plasmo": "0.90.5",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.0.258",
+    "@types/node": "20.11.5",
+    "@types/react": "18.2.48",
+    "@types/react-dom": "18.2.18",
+    "typescript": "5.3.3"
+  },
+  "manifest": {
+    "permissions": [
+      "proxy",
+      "storage",
+      "webRequest",
+      "webRequestAuthProvider"
+    ],
+    "host_permissions": [
+      "<all_urls>"
+    ]
+  }
+}
