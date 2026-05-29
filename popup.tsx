@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { DEFAULT_SETTINGS } from "~src/defaultSettings"
 import {
+  clearProfileDraft,
   createProfileDraft,
+  getProfileDraft,
   getProfilesState,
   getProxyEnabled,
   saveProfile,
   setActiveProfileId,
+  setProfileDraft,
   setProxyEnabled
 } from "~src/storage"
 import type {
@@ -24,7 +27,19 @@ type FeedbackState =
     }
   | undefined
 
+type ProfileExportPayload = {
+  version: 1
+  exportedAt: string
+  profile: Pick<ProxyProfile, "name"> & ProxySettings
+}
+
+type ParsedProxyUrl = Pick<
+  ProxySettings,
+  "proxyHost" | "proxyPort" | "username" | "password"
+>
+
 const NEW_PROFILE_ID = "__new_profile__"
+const PROFILE_EXPORT_VERSION = 1
 
 const getNextProfileName = (profileCount: number) => `Profile ${profileCount + 1}`
 
@@ -37,7 +52,8 @@ const createFormState = (
   username: profile.username,
   password: profile.password,
   proxyDomainsText: profile.proxyDomains.join("\n"),
-  directDomainsText: profile.directDomains.join("\n")
+  directDomainsText: profile.directDomains.join("\n"),
+  disableProxyDomainRouting: profile.disableProxyDomainRouting
 })
 
 const parseDomainList = (value: string) => {
@@ -52,6 +68,238 @@ const parseDomainList = (value: string) => {
   }
 
   return [...uniqueValues]
+}
+
+const parseImportedDomainList = (value: unknown, fallback: string[]) => {
+  if (Array.isArray(value)) {
+    return parseDomainList(value.map((item) => String(item)).join("\n"))
+  }
+
+  if (typeof value === "string") {
+    return parseDomainList(value)
+  }
+
+  return [...fallback]
+}
+
+const appendDomainToListText = (value: string, domain: string) => {
+  const domains = parseDomainList(value)
+
+  if (domains.includes(domain)) {
+    return {
+      nextValue: value,
+      alreadyExists: true
+    }
+  }
+
+  return {
+    nextValue: [...domains, domain].join("\n"),
+    alreadyExists: false
+  }
+}
+
+const isIpHost = (host: string) =>
+  /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(host) || host.includes(":")
+
+const getProxyDomainFromUrl = (value: string | undefined) => {
+  if (!value) {
+    return null
+  }
+
+  try {
+    const url = new URL(value)
+
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null
+    }
+
+    const host = url.hostname.trim().toLowerCase().replace(/^www\./u, "")
+
+    if (!host) {
+      return null
+    }
+
+    return host.includes(".") && !isIpHost(host) ? `.${host}` : host
+  } catch {
+    return null
+  }
+}
+
+const getCurrentTabProxyDomain = () =>
+  new Promise<string>((resolve, reject) => {
+    chrome.tabs.query(
+      {
+        active: true,
+        currentWindow: true
+      },
+      (tabs) => {
+        const errorMessage = chrome.runtime.lastError?.message
+
+        if (errorMessage) {
+          reject(new Error(errorMessage))
+          return
+        }
+
+        const domain = getProxyDomainFromUrl(tabs[0]?.url)
+
+        if (!domain) {
+          reject(new Error("Current tab does not have a web domain."))
+          return
+        }
+
+        resolve(domain)
+      }
+    )
+  })
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const getImportProfileSource = (payload: unknown) => {
+  if (!isRecord(payload)) {
+    throw new Error("Import file must contain a profile object.")
+  }
+
+  const profileValue = payload.profile
+
+  if (isRecord(profileValue)) {
+    const settingsValue = profileValue.settings
+
+    if (isRecord(settingsValue)) {
+      return {
+        ...settingsValue,
+        name: profileValue.name
+      }
+    }
+
+    return profileValue
+  }
+
+  return payload
+}
+
+const createImportedProfile = (payload: unknown) => {
+  const source = getImportProfileSource(payload)
+  const importedPort =
+    typeof source.proxyPort === "number"
+      ? source.proxyPort
+      : Number.parseInt(String(source.proxyPort), 10)
+  const draft = createProfileDraft(
+    typeof source.name === "string" && source.name.trim()
+      ? source.name.trim()
+      : "Imported profile"
+  )
+
+  const profile: ProxyProfile = {
+    ...draft,
+    proxyHost:
+      typeof source.proxyHost === "string"
+        ? source.proxyHost.trim().toLowerCase()
+        : DEFAULT_SETTINGS.proxyHost,
+    proxyPort: Number.isInteger(importedPort)
+      ? importedPort
+      : DEFAULT_SETTINGS.proxyPort,
+    username: typeof source.username === "string" ? source.username : "",
+    password: typeof source.password === "string" ? source.password : "",
+    proxyDomains: parseImportedDomainList(
+      source.proxyDomains,
+      DEFAULT_SETTINGS.proxyDomains
+    ),
+    directDomains: parseImportedDomainList(
+      source.directDomains,
+      DEFAULT_SETTINGS.directDomains
+    ),
+    disableProxyDomainRouting:
+      typeof source.disableProxyDomainRouting === "boolean"
+        ? source.disableProxyDomainRouting
+        : DEFAULT_SETTINGS.disableProxyDomainRouting
+  }
+  const result = validateForm(createFormState(profile), false)
+
+  if (!("settings" in result)) {
+    throw new Error(`Invalid profile import: ${result.error}`)
+  }
+
+  return {
+    ...profile,
+    ...result.settings,
+    name: result.profileName
+  }
+}
+
+const getExportFileName = (profileName: string) => {
+  const safeName = profileName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+
+  return `${safeName || "proxy-profile"}.json`
+}
+
+const downloadJsonFile = (fileName: string, payload: unknown) => {
+  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+    type: "application/json"
+  })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+
+  link.href = url
+  link.download = fileName
+  link.rel = "noopener"
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+const decodeUrlCredential = (value: string) => {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+const parseProxyUrl = (value: string): ParsedProxyUrl => {
+  const trimmedValue = value.trim()
+
+  if (!trimmedValue) {
+    throw new Error("Proxy URL is required.")
+  }
+
+  const url = new URL(
+    /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmedValue)
+      ? trimmedValue
+      : `http://${trimmedValue}`
+  )
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Only HTTP and HTTPS proxy URLs are supported.")
+  }
+
+  const proxyHost = url.hostname.trim().toLowerCase()
+
+  if (!proxyHost) {
+    throw new Error("Proxy URL must include a host.")
+  }
+
+  const proxyPort = url.port
+    ? Number.parseInt(url.port, 10)
+    : url.protocol === "https:"
+      ? 443
+      : 80
+
+  if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535) {
+    throw new Error("Proxy URL port must be a number from 1 to 65535.")
+  }
+
+  return {
+    proxyHost,
+    proxyPort,
+    username: decodeUrlCredential(url.username),
+    password: decodeUrlCredential(url.password)
+  }
 }
 
 const validateForm = (
@@ -100,7 +348,8 @@ const validateForm = (
       username: formState.username,
       password: formState.password,
       proxyDomains: parseDomainList(formState.proxyDomainsText),
-      directDomains: parseDomainList(formState.directDomainsText)
+      directDomains: parseDomainList(formState.directDomainsText),
+      disableProxyDomainRouting: formState.disableProxyDomainRouting
     } satisfies ProxySettings
   }
 }
@@ -133,6 +382,7 @@ const upsertProfileList = (profiles: ProxyProfile[], nextProfile: ProxyProfile) 
 }
 
 function IndexPopup() {
+  const importInputRef = useRef<HTMLInputElement | null>(null)
   const [profiles, setProfiles] = useState<ProxyProfile[]>([])
   const [activeProfileId, setActiveProfileIdState] = useState<string | null>(null)
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null)
@@ -147,12 +397,14 @@ function IndexPopup() {
   const [isLoading, setIsLoading] = useState(true)
   const [isBusy, setIsBusy] = useState(false)
   const [feedback, setFeedback] = useState<FeedbackState>()
+  const [isProxyUrlImportVisible, setIsProxyUrlImportVisible] = useState(false)
+  const [proxyUrlText, setProxyUrlText] = useState("")
 
   useEffect(() => {
     let isMounted = true
 
-    void Promise.all([getProfilesState(), getProxyEnabled()])
-      .then(([profilesState, enabled]) => {
+    void Promise.all([getProfilesState(), getProxyEnabled(), getProfileDraft()])
+      .then(([profilesState, enabled, profileDraft]) => {
         if (!isMounted) {
           return
         }
@@ -162,14 +414,23 @@ function IndexPopup() {
         setProxyEnabledState(enabled)
         setNewProfileName(getNextProfileName(profilesState.profiles.length))
 
-        const initialProfile =
-          profilesState.profiles.find(
-            ({ id }) => id === profilesState.activeProfileId
-          ) ?? profilesState.profiles[0]
+        if (profileDraft) {
+          setSelectedProfileId(NEW_PROFILE_ID)
+          setFormState(profileDraft.formState)
+          setFeedback({
+            tone: "success",
+            text: "Unsaved profile draft restored."
+          })
+        } else {
+          const initialProfile =
+            profilesState.profiles.find(
+              ({ id }) => id === profilesState.activeProfileId
+            ) ?? profilesState.profiles[0]
 
-        if (initialProfile) {
-          setSelectedProfileId(initialProfile.id)
-          setFormState(createFormState(initialProfile))
+          if (initialProfile) {
+            setSelectedProfileId(initialProfile.id)
+            setFormState(createFormState(initialProfile))
+          }
         }
       })
       .catch((error: unknown) => {
@@ -193,6 +454,14 @@ function IndexPopup() {
     }
   }, [])
 
+  useEffect(() => {
+    if (isLoading || selectedProfileId !== NEW_PROFILE_ID) {
+      return
+    }
+
+    void setProfileDraft(formState).catch(() => undefined)
+  }, [formState, isLoading, selectedProfileId])
+
   const isDraftProfile = selectedProfileId === NEW_PROFILE_ID
   const hasProfiles = profiles.length > 0
   const selectedStoredProfile =
@@ -215,29 +484,232 @@ function IndexPopup() {
       }))
     }
 
+  const handleToggleProxyDomainRouting = () => {
+    setFormState((currentState) => ({
+      ...currentState,
+      disableProxyDomainRouting: !currentState.disableProxyDomainRouting
+    }))
+    setFeedback(undefined)
+  }
+
+  const handleAddCurrentSite = async () => {
+    setIsBusy(true)
+
+    try {
+      const domain = await getCurrentTabProxyDomain()
+      const { alreadyExists, nextValue } = appendDomainToListText(
+        formState.proxyDomainsText,
+        domain
+      )
+
+      setFormState((currentState) => ({
+        ...currentState,
+        proxyDomainsText: nextValue
+      }))
+      setFeedback({
+        tone: "success",
+        text: alreadyExists
+          ? `${domain} is already in the proxy list.`
+          : `${domain} added to the proxy list.`
+      })
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Failed to read current tab."
+      })
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const handleOpenImportDialog = () => {
+    importInputRef.current?.click()
+  }
+
+  const handleOpenProxyUrlImport = () => {
+    setIsProxyUrlImportVisible(true)
+    setFeedback(undefined)
+  }
+
+  const handleCancelProxyUrlImport = () => {
+    setIsProxyUrlImportVisible(false)
+    setProxyUrlText("")
+    setFeedback(undefined)
+  }
+
+  const handleImportProxyUrl = () => {
+    try {
+      const parsedProxyUrl = parseProxyUrl(proxyUrlText)
+      const isNewDraft = !selectedProfileId
+      const nextFormState: PopupFormState = {
+        ...(isNewDraft
+          ? createFormState({
+              name:
+                newProfileName.trim() ||
+                `Proxy ${parsedProxyUrl.proxyHost}:${parsedProxyUrl.proxyPort}`,
+              ...DEFAULT_SETTINGS
+            })
+          : formState),
+        proxyHost: parsedProxyUrl.proxyHost,
+        proxyPort: String(parsedProxyUrl.proxyPort),
+        username: parsedProxyUrl.username,
+        password: parsedProxyUrl.password
+      }
+
+      if (isNewDraft) {
+        setSelectedProfileId(NEW_PROFILE_ID)
+        void setProfileDraft(nextFormState).catch(() => undefined)
+      }
+
+      setFormState(nextFormState)
+      setProxyUrlText("")
+      setIsProxyUrlImportVisible(false)
+      setFeedback({
+        tone: "success",
+        text: "Proxy URL imported."
+      })
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Failed to import URL."
+      })
+    }
+  }
+
+  const handleExportProfile = () => {
+    const result = validateForm(formState, false)
+
+    if (!("settings" in result)) {
+      setFeedback({
+        tone: "error",
+        text: result.error
+      })
+      return
+    }
+
+    const payload: ProfileExportPayload = {
+      version: PROFILE_EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      profile: {
+        name: result.profileName,
+        ...result.settings
+      }
+    }
+
+    downloadJsonFile(getExportFileName(result.profileName), payload)
+    setFeedback({
+      tone: "success",
+      text: "Profile exported."
+    })
+  }
+
+  const handleImportProfile = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0]
+
+    event.target.value = ""
+
+    if (!file) {
+      return
+    }
+
+    setIsBusy(true)
+
+    try {
+      const importedProfile = createImportedProfile(JSON.parse(await file.text()))
+      const savedProfile = await saveProfile(importedProfile)
+      const nextProfiles = upsertProfileList(profiles, savedProfile)
+      const nextActiveProfileId = activeProfileId ?? nextProfiles[0]?.id ?? null
+
+      await clearProfileDraft()
+      setProfiles(nextProfiles)
+      setSelectedProfileId(savedProfile.id)
+      setFormState(createFormState(savedProfile))
+      setActiveProfileIdState(nextActiveProfileId)
+      setNewProfileName(getNextProfileName(nextProfiles.length))
+      setIsProxyUrlImportVisible(false)
+      setProxyUrlText("")
+      setFeedback({
+        tone: "success",
+        text: "Profile imported."
+      })
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text:
+          error instanceof Error ? error.message : "Failed to import profile."
+      })
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const handleDiscardDraft = async () => {
+    setIsBusy(true)
+
+    try {
+      await clearProfileDraft()
+
+      const nextProfile =
+        profiles.find(({ id }) => id === activeProfileId) ?? profiles[0] ?? null
+
+      if (nextProfile) {
+        setSelectedProfileId(nextProfile.id)
+        setFormState(createFormState(nextProfile))
+      } else {
+        setSelectedProfileId(null)
+        setFormState(
+          createFormState({
+            name: newProfileName,
+            ...DEFAULT_SETTINGS
+          })
+        )
+      }
+
+      setFeedback({
+        tone: "success",
+        text: "Draft discarded."
+      })
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text:
+          error instanceof Error ? error.message : "Failed to discard draft."
+      })
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
   const startDraftProfile = (preferredName?: string) => {
     const draftName = (preferredName ?? newProfileName).trim() || newProfileName
+    const nextFormState = createFormState({
+      name: draftName,
+      ...DEFAULT_SETTINGS
+    })
 
     setSelectedProfileId(NEW_PROFILE_ID)
-    setFormState(
-      createFormState({
-        name: draftName,
-        ...DEFAULT_SETTINGS
-      })
-    )
+    setFormState(nextFormState)
     setFeedback(undefined)
+    setIsProxyUrlImportVisible(false)
+    setProxyUrlText("")
+    void setProfileDraft(nextFormState).catch(() => undefined)
   }
 
   const selectProfile = (profile: ProxyProfile) => {
     setSelectedProfileId(profile.id)
     setFormState(createFormState(profile))
     setFeedback(undefined)
+    setIsProxyUrlImportVisible(false)
+    setProxyUrlText("")
   }
 
   const persistCurrentProfile = async (options: {
     activateAfterSave: boolean
     requireCredentials: boolean
   }) => {
+    const wasDraftProfile = isDraftProfile
     const result = validateForm(formState, options.requireCredentials)
 
     if (!("settings" in result)) {
@@ -263,6 +735,10 @@ function IndexPopup() {
 
     if (options.activateAfterSave) {
       await setActiveProfileId(savedProfile.id)
+    }
+
+    if (wasDraftProfile) {
+      await clearProfileDraft()
     }
 
     setProfiles(nextProfiles)
@@ -469,6 +945,48 @@ function IndexPopup() {
     }
   }
 
+  const renderProxyUrlImport = () =>
+    isProxyUrlImportVisible ? (
+      <section style={urlImportPanelStyle}>
+        <label style={{ display: "grid", gap: 6 }}>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>Proxy URL</span>
+          <input
+            disabled={isLoading || isBusy}
+            onChange={(event) => setProxyUrlText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault()
+                handleImportProxyUrl()
+              }
+            }}
+            placeholder="http://user:password@host:8080"
+            style={inputStyle}
+            value={proxyUrlText}
+          />
+        </label>
+
+        <div
+          style={{
+            display: "grid",
+            gap: 8,
+            gridTemplateColumns: "repeat(2, minmax(0, 1fr))"
+          }}>
+          <button
+            disabled={isLoading || isBusy}
+            onClick={handleImportProxyUrl}
+            style={primaryButtonStyle}>
+            Import URL
+          </button>
+          <button
+            disabled={isLoading || isBusy}
+            onClick={handleCancelProxyUrlImport}
+            style={secondaryButtonStyle}>
+            Cancel
+          </button>
+        </div>
+      </section>
+    ) : null
+
   const renderOnboarding = () => (
     <div
       style={{
@@ -514,6 +1032,22 @@ function IndexPopup() {
         style={primaryButtonStyle}>
         Add profile
       </button>
+
+      <button
+        disabled={isLoading || isBusy}
+        onClick={handleOpenImportDialog}
+        style={secondaryButtonStyle}>
+        Import profile
+      </button>
+
+      <button
+        disabled={isLoading || isBusy}
+        onClick={handleOpenProxyUrlImport}
+        style={secondaryButtonStyle}>
+        Import from URL
+      </button>
+
+      {renderProxyUrlImport()}
     </div>
   )
 
@@ -589,13 +1123,41 @@ function IndexPopup() {
             Profiles
           </div>
 
-          <button
-            disabled={isLoading || isBusy}
-            onClick={() => startDraftProfile()}
-            style={miniButtonStyle}>
-            Add profile
-          </button>
+          <div
+            style={{
+              display: "flex",
+              gap: 6,
+              flexWrap: "wrap",
+              justifyContent: "flex-end"
+            }}>
+            <button
+              disabled={isLoading || isBusy}
+              onClick={handleOpenImportDialog}
+              style={miniButtonStyle}>
+              Import
+            </button>
+            <button
+              disabled={isLoading || isBusy}
+              onClick={handleExportProfile}
+              style={miniButtonStyle}>
+              Export
+            </button>
+            <button
+              disabled={isLoading || isBusy}
+              onClick={handleOpenProxyUrlImport}
+              style={miniButtonStyle}>
+              From URL
+            </button>
+            <button
+              disabled={isLoading || isBusy}
+              onClick={() => startDraftProfile()}
+              style={miniButtonStyle}>
+              Add
+            </button>
+          </div>
         </div>
+
+        {renderProxyUrlImport()}
 
         <div
           style={{
@@ -764,9 +1326,76 @@ function IndexPopup() {
           />
         </label>
 
+        <section
+          style={{
+            display: "grid",
+            gap: 8,
+            padding: 12,
+            borderRadius: 8,
+            border: "1px solid #d7cec0",
+            backgroundColor: "#fbfaf7"
+          }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10
+            }}>
+            <div
+              style={{
+                display: "grid",
+                gap: 2
+              }}>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>
+                Domain list routing
+              </span>
+              <span style={{ fontSize: 11, color: "#5b6472" }}>
+                {formState.disableProxyDomainRouting
+                  ? "Disabled: proxy is used globally"
+                  : "Enabled: proxy uses the domain list"}
+              </span>
+            </div>
+
+            <button
+              disabled={isLoading || isBusy}
+              onClick={handleToggleProxyDomainRouting}
+              style={{
+                ...miniButtonStyle,
+                minWidth: 90,
+                backgroundColor: formState.disableProxyDomainRouting
+                  ? "#f7ead0"
+                  : "#e8eef7",
+                borderColor: formState.disableProxyDomainRouting
+                  ? "#d6a94a"
+                  : "#b9c9df",
+                color: formState.disableProxyDomainRouting
+                  ? "#8a5d12"
+                  : "#24405f"
+              }}>
+              {formState.disableProxyDomainRouting ? "Enable list" : "Disable list"}
+            </button>
+          </div>
+        </section>
+
         <label style={{ display: "grid", gap: 6 }}>
-          <span style={{ fontSize: 12, fontWeight: 600 }}>
+          <span
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              fontSize: 12,
+              fontWeight: 600
+            }}>
             Domains via proxy
+            <button
+              disabled={isLoading || isBusy}
+              onClick={() => void handleAddCurrentSite()}
+              style={miniButtonStyle}
+              type="button">
+              Add current site
+            </button>
           </span>
           <textarea
             disabled={isLoading || isBusy}
@@ -795,7 +1424,9 @@ function IndexPopup() {
         style={{
           display: "grid",
           gap: 8,
-          gridTemplateColumns: "repeat(3, minmax(0, 1fr))"
+          gridTemplateColumns: isDraftProfile
+            ? "repeat(4, minmax(0, 1fr))"
+            : "repeat(3, minmax(0, 1fr))"
         }}>
         <button
           disabled={isLoading || isBusy}
@@ -815,6 +1446,14 @@ function IndexPopup() {
           style={secondaryButtonStyle}>
           Reset
         </button>
+        {isDraftProfile ? (
+          <button
+            disabled={isLoading || isBusy}
+            onClick={() => void handleDiscardDraft()}
+            style={secondaryButtonStyle}>
+            Discard
+          </button>
+        ) : null}
       </div>
     </div>
   )
@@ -837,6 +1476,14 @@ function IndexPopup() {
       ) : (
         renderEditor()
       )}
+
+      <input
+        accept="application/json,.json"
+        onChange={(event) => void handleImportProfile(event)}
+        ref={importInputRef}
+        style={{ display: "none" }}
+        type="file"
+      />
 
       <div
         style={{
@@ -903,6 +1550,15 @@ const miniButtonStyle: React.CSSProperties = {
   ...secondaryButtonStyle,
   padding: "7px 10px",
   fontSize: 12
+}
+
+const urlImportPanelStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+  padding: 10,
+  borderRadius: 8,
+  border: "1px solid #d7cec0",
+  backgroundColor: "#fbfaf7"
 }
 
 const profileButtonStyle: React.CSSProperties = {

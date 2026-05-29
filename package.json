@@ -1,7 +1,7 @@
 {
   "name": "chrome-proxy-manager",
   "displayName": "Chrome Proxy Manager",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "description": "Chrome-only HTTP proxy manager with PAC routing and automatic proxy authentication.",
   "author": "OpenAI Codex",
   "packageManager": "pnpm@10.33.2",
@@ -25,6 +25,7 @@
   },
   "manifest": {
     "permissions": [
+      "activeTab",
       "proxy",
       "storage",
       "webRequest",

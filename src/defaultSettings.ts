@@ -52,7 +52,8 @@ export const DEFAULT_SETTINGS: ProxySettings = {
   username: "",
   password: "",
   proxyDomains: [...DEFAULT_PROXY_DOMAINS],
-  directDomains: [...DEFAULT_DIRECT_DOMAINS]
+  directDomains: [...DEFAULT_DIRECT_DOMAINS],
+  disableProxyDomainRouting: false
 }
 
 export const DEFAULT_PROFILE_NAME = "Default profile"

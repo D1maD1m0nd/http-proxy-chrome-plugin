@@ -4,6 +4,8 @@ import {
   DEFAULT_SETTINGS
 } from "~src/defaultSettings"
 import type {
+  PopupDraftState,
+  PopupFormState,
   ProfilesState,
   ProxyProfile,
   ProxySettings
@@ -13,6 +15,7 @@ const PROFILES_KEY = "proxyProfiles"
 const ACTIVE_PROFILE_ID_KEY = "activeProfileId"
 const LEGACY_SETTINGS_KEY = "proxySettings"
 const ENABLED_KEY = "proxyEnabled"
+const PROFILE_DRAFT_KEY = "profileDraft"
 
 const getLastError = () => chrome.runtime.lastError?.message
 
@@ -104,6 +107,53 @@ const normalizeTimestamp = (value: unknown, fallback: number) => {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const normalizeDraftText = (value: unknown, fallback: string) =>
+  typeof value === "string" ? value : fallback
+
+const normalizeDraftDomainText = (value: unknown, fallback: string[]) => {
+  if (typeof value === "string") {
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item)).join("\n")
+  }
+
+  return fallback.join("\n")
+}
+
+const normalizeDraftFormState = (value: unknown): PopupFormState | null => {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  return {
+    profileName: normalizeDraftText(value.profileName, "New profile"),
+    proxyHost: normalizeDraftText(value.proxyHost, DEFAULT_SETTINGS.proxyHost),
+    proxyPort: normalizeDraftText(
+      value.proxyPort,
+      String(DEFAULT_SETTINGS.proxyPort)
+    ),
+    username: normalizeDraftText(value.username, DEFAULT_SETTINGS.username),
+    password: normalizeDraftText(value.password, DEFAULT_SETTINGS.password),
+    proxyDomainsText: normalizeDraftDomainText(
+      value.proxyDomainsText,
+      DEFAULT_SETTINGS.proxyDomains
+    ),
+    directDomainsText: normalizeDraftDomainText(
+      value.directDomainsText,
+      DEFAULT_SETTINGS.directDomains
+    ),
+    disableProxyDomainRouting:
+      typeof value.disableProxyDomainRouting === "boolean"
+        ? value.disableProxyDomainRouting
+        : DEFAULT_SETTINGS.disableProxyDomainRouting
+  }
+}
+
 const normalizeSettings = (value?: Partial<ProxySettings>): ProxySettings => ({
   proxyHost:
     typeof value?.proxyHost === "string" && value.proxyHost.trim()
@@ -125,7 +175,11 @@ const normalizeSettings = (value?: Partial<ProxySettings>): ProxySettings => ({
   directDomains: normalizeDomainList(
     value?.directDomains,
     DEFAULT_SETTINGS.directDomains
-  )
+  ),
+  disableProxyDomainRouting:
+    typeof value?.disableProxyDomainRouting === "boolean"
+      ? value.disableProxyDomainRouting
+      : DEFAULT_SETTINGS.disableProxyDomainRouting
 })
 
 const normalizeProfile = (
@@ -339,4 +393,39 @@ export const setProxyEnabled = async (enabled: boolean) => {
   await storageSet({
     [ENABLED_KEY]: enabled
   })
+}
+
+export const getProfileDraft = async (): Promise<PopupDraftState | null> => {
+  const stored = await storageGet<{ [PROFILE_DRAFT_KEY]?: unknown }>({
+    [PROFILE_DRAFT_KEY]: null
+  })
+  const draftValue = stored[PROFILE_DRAFT_KEY]
+
+  if (!isRecord(draftValue)) {
+    return null
+  }
+
+  const formState = normalizeDraftFormState(draftValue.formState)
+
+  if (!formState) {
+    return null
+  }
+
+  return {
+    formState,
+    updatedAt: normalizeTimestamp(draftValue.updatedAt, Date.now())
+  }
+}
+
+export const setProfileDraft = async (formState: PopupFormState) => {
+  await storageSet({
+    [PROFILE_DRAFT_KEY]: {
+      formState,
+      updatedAt: Date.now()
+    } satisfies PopupDraftState
+  })
+}
+
+export const clearProfileDraft = async () => {
+  await storageRemove(PROFILE_DRAFT_KEY)
 }

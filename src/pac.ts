@@ -10,6 +10,7 @@ function FindProxyForURL(url, host) {
   var localPatterns = ${JSON.stringify(LOCAL_DIRECT_PATTERNS)};
   var directPatterns = ${JSON.stringify(settings.directDomains)};
   var proxyPatterns = ${JSON.stringify(settings.proxyDomains)};
+  var disableProxyDomainRouting = ${JSON.stringify(settings.disableProxyDomainRouting)};
 
   function matchPattern(value, pattern) {
     if (!pattern) {
@@ -56,6 +57,10 @@ function FindProxyForURL(url, host) {
 
   if (matchesAny(normalizedHost, directPatterns)) {
     return "DIRECT";
+  }
+
+  if (disableProxyDomainRouting) {
+    return ${JSON.stringify(proxyEndpoint)};
   }
 
   if (matchesAny(normalizedHost, proxyPatterns)) {

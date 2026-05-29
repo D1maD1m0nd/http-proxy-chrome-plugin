@@ -5,6 +5,7 @@ export interface ProxySettings {
   password: string
   proxyDomains: string[]
   directDomains: string[]
+  disableProxyDomainRouting: boolean
 }
 
 export interface ProxyProfile extends ProxySettings {
@@ -22,6 +23,12 @@ export interface PopupFormState {
   password: string
   proxyDomainsText: string
   directDomainsText: string
+  disableProxyDomainRouting: boolean
+}
+
+export interface PopupDraftState {
+  formState: PopupFormState
+  updatedAt: number
 }
 
 export interface ProfilesState {
