@@ -1,5 +1,5 @@
-import { generatePacScript } from "~src/pac"
-import type { ProxySettings } from "~src/types"
+import { generatePacScript } from "./pac"
+import type { ProxySettings } from "./types"
 
 const getLastError = () => chrome.runtime.lastError?.message
 

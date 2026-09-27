@@ -1,4 +1,4 @@
-import type { ProxySettings } from "~src/types"
+import type { ProxySettings } from "./types"
 
 export const DEFAULT_PROXY_DOMAINS = [
   ".openai.com",

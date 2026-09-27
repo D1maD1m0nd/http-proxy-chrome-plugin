@@ -1,0 +1,4 @@
+{
+  "appName": { "message": "Proxy Manager" },
+  "appDescription": { "message": "HTTP proxy manager with profiles, domain routing and automatic proxy authentication." }
+}

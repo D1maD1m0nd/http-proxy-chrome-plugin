@@ -1,42 +1,41 @@
 {
-  "name": "chrome-proxy-manager",
-  "displayName": "Chrome Proxy Manager",
+  "name": "proxy-manager",
+  "displayName": "Proxy Manager",
   "version": "0.6.0",
   "description": "Chrome-only HTTP proxy manager with PAC routing and automatic proxy authentication.",
   "author": "OpenAI Codex",
   "packageManager": "pnpm@10.33.2",
   "scripts": {
-    "dev": "plasmo dev --src-path=.",
-    "build": "plasmo build --src-path=.",
-    "package": "plasmo package --src-path=.",
-    "check": "tsc --noEmit",
-    "test": "tsx --tsconfig tests/tsconfig.json --test tests/*.test.tsx"
+    "dev": "wxt",
+    "build": "wxt build",
+    "package": "wxt zip",
+    "postinstall": "wxt prepare",
+    "check": "wxt prepare && tsc --noEmit",
+    "test": "tsx --tsconfig tests/tsconfig.json --test tests/*.test.tsx",
+    "test:build": "node --test tests/build.test.mjs"
   },
   "dependencies": {
-    "plasmo": "0.90.5",
-    "react": "18.2.0",
-    "react-dom": "18.2.0"
+    "i18next": "26.4.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-i18next": "17.0.15"
   },
   "devDependencies": {
-    "@types/chrome": "0.0.258",
-    "@types/node": "20.11.5",
-    "@types/react": "18.2.48",
-    "@types/react-dom": "18.2.18",
-    "@types/react-test-renderer": "18.0.7",
-    "react-test-renderer": "18.2.0",
-    "tsx": "4.20.5",
-    "typescript": "5.3.3"
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@types/chrome": "0.3.0",
+    "@types/jsdom": "30.0.0",
+    "@types/node": "24.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@wxt-dev/module-react": "1.2.2",
+    "jsdom": "30.1.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vite": "8.3.1",
+    "wxt": "0.21.4"
   },
-  "manifest": {
-    "permissions": [
-      "activeTab",
-      "proxy",
-      "storage",
-      "webRequest",
-      "webRequestAuthProvider"
-    ],
-    "host_permissions": [
-      "<all_urls>"
-    ]
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   }
 }

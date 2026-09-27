@@ -1,10 +1,10 @@
-import { getActiveProfile } from "~src/storage"
+import { getActiveProfile } from "./storage"
 
 const MAX_AUTH_ATTEMPTS = 3
 const authAttempts = new Map<string, number>()
 
 const getAttemptKey = (
-  details: chrome.webRequest.WebAuthenticationChallengeDetails
+  details: chrome.webRequest.OnAuthRequiredDetails
 ) => {
   const challengerHost = details.challenger?.host ?? "unknown-host"
   const challengerPort = details.challenger?.port ?? 0
@@ -23,8 +23,8 @@ export const clearAuthAttemptsForRequest = (requestId: string) => {
 }
 
 export const handleProxyAuthRequired = async (
-  details: chrome.webRequest.WebAuthenticationChallengeDetails,
-  callback: (response?: chrome.webRequest.BlockingResponse) => void
+  details: chrome.webRequest.OnAuthRequiredDetails,
+  callback: (response: chrome.webRequest.BlockingResponse) => void
 ) => {
   try {
     if (!details.isProxy || !details.challenger) {

@@ -1,9 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 
-import { DEFAULT_SETTINGS } from "~src/defaultSettings"
+import { DEFAULT_SETTINGS } from "./defaultSettings"
+import i18n, {
+  changeLanguage,
+  getErrorFeedback,
+  LocalizedError,
+  message,
+  translateMessage,
+  type Language,
+  type LocalizedMessage
+} from "./i18n"
 import {
   clearProfileDraft,
   createProfileDraft,
+  deleteProfile,
   getProfileDraft,
   getProfilesState,
   getProxyEnabled,
@@ -11,19 +22,19 @@ import {
   setActiveProfileId,
   setProfileDraft,
   setProxyEnabled
-} from "~src/storage"
+} from "./storage"
 import type {
   BackgroundMessage,
   BackgroundResponse,
   PopupFormState,
   ProxyProfile,
   ProxySettings
-} from "~src/types"
+} from "./types"
 
 type FeedbackState =
   | {
       tone: "success" | "error"
-      text: string
+      text: LocalizedMessage
     }
   | undefined
 
@@ -38,10 +49,49 @@ type ParsedProxyUrl = Pick<
   "proxyHost" | "proxyPort" | "username" | "password"
 >
 
+type PingResult = {
+  endpoint: string
+  status: "checking" | "success" | "error"
+  latencyMs?: number
+}
+
 const NEW_PROFILE_ID = "__new_profile__"
 const PROFILE_EXPORT_VERSION = 1
+const PING_TIMEOUT_MS = 5000
 
-const getNextProfileName = (profileCount: number) => `Profile ${profileCount + 1}`
+const getProfileEndpoint = (profile: ProxyProfile) =>
+  `${profile.proxyHost}:${profile.proxyPort}`
+
+const pingProfile = async (profile: ProxyProfile) => {
+  if (!profile.proxyHost.trim()) {
+    throw new LocalizedError(message("hostMissing"))
+  }
+
+  const host = profile.proxyHost.includes(":") && !profile.proxyHost.startsWith("[")
+    ? `[${profile.proxyHost}]`
+    : profile.proxyHost
+  const url = new URL(`http://${host}:${profile.proxyPort}/`)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), PING_TIMEOUT_MS)
+  const startedAt = performance.now()
+
+  try {
+    await fetch(url.toString(), {
+      cache: "no-store",
+      credentials: "omit",
+      mode: "no-cors",
+      redirect: "manual",
+      signal: controller.signal
+    })
+
+    return Math.max(0, Math.round(performance.now() - startedAt))
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+const getNextProfileName = (profileCount: number) =>
+  i18n.t("profileNumber", { number: profileCount + 1 })
 
 const createFormState = (
   profile: Pick<ProxyProfile, "name"> & ProxySettings
@@ -143,7 +193,7 @@ const getCurrentTabProxyDomain = () =>
         const domain = getProxyDomainFromUrl(tabs[0]?.url)
 
         if (!domain) {
-          reject(new Error("Current tab does not have a web domain."))
+          reject(new LocalizedError(message("noTabDomain")))
           return
         }
 
@@ -157,7 +207,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const getImportProfileSource = (payload: unknown) => {
   if (!isRecord(payload)) {
-    throw new Error("Import file must contain a profile object.")
+    throw new LocalizedError(message("importObjectRequired"))
   }
 
   const profileValue = payload.profile
@@ -187,7 +237,7 @@ const createImportedProfile = (payload: unknown) => {
   const draft = createProfileDraft(
     typeof source.name === "string" && source.name.trim()
       ? source.name.trim()
-      : "Imported profile"
+      : i18n.t("importedProfile")
   )
 
   const profile: ProxyProfile = {
@@ -217,7 +267,7 @@ const createImportedProfile = (payload: unknown) => {
   const result = validateForm(createFormState(profile), false)
 
   if (!("settings" in result)) {
-    throw new Error(`Invalid profile import: ${result.error}`)
+    throw new LocalizedError(message("invalidImport", { reason: result.error }))
   }
 
   return {
@@ -265,23 +315,28 @@ const parseProxyUrl = (value: string): ParsedProxyUrl => {
   const trimmedValue = value.trim()
 
   if (!trimmedValue) {
-    throw new Error("Proxy URL is required.")
+    throw new LocalizedError(message("urlRequired"))
   }
 
-  const url = new URL(
-    /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmedValue)
-      ? trimmedValue
-      : `http://${trimmedValue}`
-  )
+  let url: URL
+  try {
+    url = new URL(
+      /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmedValue)
+        ? trimmedValue
+        : `http://${trimmedValue}`
+    )
+  } catch {
+    throw new LocalizedError(message("invalidUrl"))
+  }
 
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Only HTTP and HTTPS proxy URLs are supported.")
+    throw new LocalizedError(message("urlProtocol"))
   }
 
   const proxyHost = url.hostname.trim().toLowerCase()
 
   if (!proxyHost) {
-    throw new Error("Proxy URL must include a host.")
+    throw new LocalizedError(message("urlHostRequired"))
   }
 
   const proxyPort = url.port
@@ -291,7 +346,7 @@ const parseProxyUrl = (value: string): ParsedProxyUrl => {
       : 80
 
   if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535) {
-    throw new Error("Proxy URL port must be a number from 1 to 65535.")
+    throw new LocalizedError(message("urlPortInvalid"))
   }
 
   return {
@@ -305,18 +360,18 @@ const parseProxyUrl = (value: string): ParsedProxyUrl => {
 const validateForm = (
   formState: PopupFormState,
   requireCredentials: boolean
-) => {
+): { error: LocalizedMessage } | { profileName: string; settings: ProxySettings } => {
   const profileName = formState.profileName.trim()
 
   if (!profileName) {
     return {
-      error: "Profile name is required."
+      error: message("nameRequired")
     }
   }
 
   if (!formState.proxyHost.trim()) {
     return {
-      error: "Proxy host is required."
+      error: message("hostRequired")
     }
   }
 
@@ -324,19 +379,19 @@ const validateForm = (
 
   if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535) {
     return {
-      error: "Proxy port must be a number from 1 to 65535."
+      error: message("portInvalid")
     }
   }
 
   if (requireCredentials && !formState.username.trim()) {
     return {
-      error: "Username is required when proxy is enabled."
+      error: message("usernameRequired")
     }
   }
 
   if (requireCredentials && !formState.password) {
     return {
-      error: "Password is required when proxy is enabled."
+      error: message("passwordRequired")
     }
   }
 
@@ -382,6 +437,8 @@ const upsertProfileList = (profiles: ProxyProfile[], nextProfile: ProxyProfile) 
 }
 
 function IndexPopup() {
+  const { t } = useTranslation()
+  const [isChangingLanguage, setIsChangingLanguage] = useState(false)
   const importInputRef = useRef<HTMLInputElement | null>(null)
   const [profiles, setProfiles] = useState<ProxyProfile[]>([])
   const [activeProfileId, setActiveProfileIdState] = useState<string | null>(null)
@@ -397,10 +454,38 @@ function IndexPopup() {
   const [proxyEnabled, setProxyEnabledState] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isBusy, setIsBusy] = useState(false)
+  const [isPinging, setIsPinging] = useState(false)
+  const [pingResults, setPingResults] = useState<Record<string, PingResult>>({})
   const [feedback, setFeedback] = useState<FeedbackState>()
   const [isProxyUrlImportVisible, setIsProxyUrlImportVisible] = useState(false)
   const [proxyUrlText, setProxyUrlText] = useState("")
   const [isProfileListVisible, setIsProfileListVisible] = useState(true)
+  const [isDeleteConfirmationVisible, setIsDeleteConfirmationVisible] = useState(false)
+
+  useEffect(() => {
+    setIsDeleteConfirmationVisible(false)
+  }, [selectedProfileId, isProfileListVisible])
+
+  useEffect(() => {
+    document.documentElement.lang = i18n.resolvedLanguage ?? "en"
+    document.title = t("appName")
+  }, [t])
+
+  const handleLanguageChange = async (language: Language) => {
+    const previousSuggestedName = getNextProfileName(profiles.length)
+    setIsChangingLanguage(true)
+    try {
+      await changeLanguage(language)
+      // Only update the suggested name; saved profiles and drafts are user data.
+      setNewProfileName((current) =>
+        current === previousSuggestedName ? getNextProfileName(profiles.length) : current
+      )
+    } catch (error) {
+      setFeedback({ tone: "error", text: getErrorFeedback(error, "languageSaveFailed") })
+    } finally {
+      setIsChangingLanguage(false)
+    }
+  }
 
   useEffect(() => {
     let isMounted = true
@@ -423,7 +508,7 @@ function IndexPopup() {
           setIsProfileListVisible(false)
           setFeedback({
             tone: "success",
-            text: "Unsaved profile draft restored."
+            text: message("draftRestored")
           })
         } else {
           const initialProfile =
@@ -444,7 +529,7 @@ function IndexPopup() {
 
         setFeedback({
           tone: "error",
-          text: error instanceof Error ? error.message : "Failed to load settings."
+          text: getErrorFeedback(error, "loadFailed")
         })
       })
       .finally(() => {
@@ -475,10 +560,66 @@ function IndexPopup() {
     selectedProfileId && !isDraftProfile
       ? profiles.find(({ id }) => id === selectedProfileId) ?? null
       : null
-  const statusLabel = useMemo(
-    () => (proxyEnabled ? "Enabled" : "Disabled"),
-    [proxyEnabled]
-  )
+  const statusLabel = proxyEnabled ? t("enabled") : t("disabled")
+
+  const handlePingProfiles = async () => {
+    if (isPinging || profiles.length === 0) {
+      return
+    }
+
+    setIsPinging(true)
+    setPingResults(Object.fromEntries(profiles.map((profile) => [
+      profile.id,
+      { endpoint: getProfileEndpoint(profile), status: "checking" }
+    ])))
+
+    try {
+      await Promise.all(profiles.map(async (profile) => {
+        let result: PingResult
+
+        try {
+          result = {
+            endpoint: getProfileEndpoint(profile),
+            status: "success",
+            latencyMs: await pingProfile(profile)
+          }
+        } catch {
+          result = {
+            endpoint: getProfileEndpoint(profile),
+            status: "error"
+          }
+        }
+
+        setPingResults((current) => ({ ...current, [profile.id]: result }))
+      }))
+    } finally {
+      setIsPinging(false)
+    }
+  }
+
+  const renderPingResult = (profile: ProxyProfile) => {
+    const result = pingResults[profile.id]
+
+    if (!result || result.endpoint !== getProfileEndpoint(profile)) {
+      return null
+    }
+
+    const label = result.status === "checking"
+      ? t("checking")
+      : result.status === "error"
+        ? t("unavailable")
+        : t("latency", { ms: result.latencyMs })
+
+    return (
+      <span style={{
+        fontSize: 11,
+        fontWeight: 700,
+        color: result.status === "error" ? "#8a2d3b" : "#155e3b"
+      }}>
+        {label}
+      </span>
+    )
+  }
 
   const updateField =
     (field: keyof PopupFormState) =>
@@ -516,13 +657,13 @@ function IndexPopup() {
       setFeedback({
         tone: "success",
         text: alreadyExists
-          ? `${domain} is already in the proxy list.`
-          : `${domain} added to the proxy list.`
+          ? message("domainExists", { domain })
+          : message("domainAdded", { domain })
       })
     } catch (error) {
       setFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to read current tab."
+        text: getErrorFeedback(error, "tabFailed")
       })
     } finally {
       setIsBusy(false)
@@ -553,7 +694,7 @@ function IndexPopup() {
           ? createFormState({
               name:
                 newProfileName.trim() ||
-                `Proxy ${parsedProxyUrl.proxyHost}:${parsedProxyUrl.proxyPort}`,
+                t("proxyName", { host: parsedProxyUrl.proxyHost, port: parsedProxyUrl.proxyPort }),
               ...DEFAULT_SETTINGS
             })
           : formState),
@@ -573,12 +714,12 @@ function IndexPopup() {
       setIsProxyUrlImportVisible(false)
       setFeedback({
         tone: "success",
-        text: "Proxy URL imported."
+        text: message("urlImported")
       })
     } catch (error) {
       setFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to import URL."
+        text: getErrorFeedback(error, "urlImportFailed")
       })
     }
   }
@@ -606,7 +747,7 @@ function IndexPopup() {
     downloadJsonFile(getExportFileName(result.profileName), payload)
     setFeedback({
       tone: "success",
-      text: "Profile exported."
+      text: message("profileExported")
     })
   }
 
@@ -624,7 +765,14 @@ function IndexPopup() {
     setIsBusy(true)
 
     try {
-      const importedProfile = createImportedProfile(JSON.parse(await file.text()))
+      const fileText = await file.text()
+      let payload: unknown
+      try {
+        payload = JSON.parse(fileText)
+      } catch {
+        throw new LocalizedError(message("invalidJson"))
+      }
+      const importedProfile = createImportedProfile(payload)
       const savedProfile = await saveProfile(importedProfile)
       const nextProfiles = upsertProfileList(profiles, savedProfile)
       const nextActiveProfileId = activeProfileId ?? nextProfiles[0]?.id ?? null
@@ -639,13 +787,13 @@ function IndexPopup() {
       setProxyUrlText("")
       setFeedback({
         tone: "success",
-        text: "Profile imported."
+        text: message("profileImported")
       })
     } catch (error) {
       setFeedback({
         tone: "error",
         text:
-          error instanceof Error ? error.message : "Failed to import profile."
+          getErrorFeedback(error, "profileImportFailed")
       })
     } finally {
       setIsBusy(false)
@@ -677,14 +825,61 @@ function IndexPopup() {
 
       setFeedback({
         tone: "success",
-        text: "Draft discarded."
+        text: message("draftDiscarded")
       })
     } catch (error) {
       setFeedback({
         tone: "error",
         text:
-          error instanceof Error ? error.message : "Failed to discard draft."
+          getErrorFeedback(error, "discardFailed")
       })
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const handleDeleteProfile = async () => {
+    if (!selectedStoredProfile || isBusy) return
+
+    setIsBusy(true)
+    try {
+      if (isSelectedProfileEnabled) {
+        await setProxyEnabled(false)
+        try {
+          const response = await sendBackgroundMessage({ type: "SYNC_PROXY_STATE" })
+          if (!response.ok) {
+            if (response.error) throw new Error(response.error)
+            throw new LocalizedError(message("disableFailed"))
+          }
+        } catch (error) {
+          // Keep the profile and restore the connection if disabling failed.
+          await setProxyEnabled(true)
+          await sendBackgroundMessage({ type: "SYNC_PROXY_STATE" }).catch(() => undefined)
+          throw error
+        }
+        setProxyEnabledState(false)
+      }
+
+      const nextState = await deleteProfile(selectedStoredProfile.id)
+      const nextProfile = nextState.profiles.find(({ id }) => id === nextState.activeProfileId)
+        ?? nextState.profiles[0]
+      const suggestedName = getNextProfileName(nextState.profiles.length)
+
+      setProfiles(nextState.profiles)
+      setActiveProfileIdState(nextState.activeProfileId)
+      setSelectedProfileId(nextProfile?.id ?? null)
+      setFormState(createFormState(nextProfile ?? { name: suggestedName, ...DEFAULT_SETTINGS }))
+      setNewProfileName(suggestedName)
+      setIsProfileListVisible(true)
+      setIsDeleteConfirmationVisible(false)
+      setIsProxyUrlImportVisible(false)
+      setProxyUrlText("")
+      setFeedback({
+        tone: "success",
+        text: message("profileDeleted", { name: selectedStoredProfile.name })
+      })
+    } catch (error) {
+      setFeedback({ tone: "error", text: getErrorFeedback(error, "deleteFailed") })
     } finally {
       setIsBusy(false)
     }
@@ -787,12 +982,12 @@ function IndexPopup() {
 
       setFeedback({
         tone: "success",
-        text: "Profile saved."
+        text: message("profileSaved")
       })
     } catch (error) {
       setFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to save profile."
+        text: getErrorFeedback(error, "saveFailed")
       })
     } finally {
       setIsBusy(false)
@@ -817,19 +1012,20 @@ function IndexPopup() {
       })
 
       if (!response.ok) {
-        throw new Error(response.error ?? "Failed to apply proxy settings.")
+        if (response.error) throw new Error(response.error)
+        throw new LocalizedError(message("applySettingsFailed"))
       }
 
       setFeedback({
         tone: "success",
         text: proxyEnabled
-          ? "Active profile updated."
-          : "Profile saved and marked active."
+          ? message("activeProfileUpdated")
+          : message("profileActivated")
       })
     } catch (error) {
       setFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to apply profile."
+        text: getErrorFeedback(error, "applyFailed")
       })
     } finally {
       setIsBusy(false)
@@ -859,18 +1055,19 @@ function IndexPopup() {
         })
 
         if (!response.ok) {
-          throw new Error(response.error ?? "Failed to enable proxy.")
+          if (response.error) throw new Error(response.error)
+          throw new LocalizedError(message("enableFailed"))
         }
 
         setProxyEnabledState(true)
         setFeedback({
           tone: "success",
-          text: "Proxy enabled."
+          text: message("proxyEnabled")
         })
       } catch (error) {
         setFeedback({
           tone: "error",
-          text: error instanceof Error ? error.message : "Failed to enable proxy."
+          text: getErrorFeedback(error, "enableFailed")
         })
         // A failed switch must not turn off the previously connected profile.
         await setActiveProfileId(activeProfileId).catch(() => undefined)
@@ -896,18 +1093,19 @@ function IndexPopup() {
       })
 
       if (!response.ok) {
-        throw new Error(response.error ?? "Failed to disable proxy.")
+        if (response.error) throw new Error(response.error)
+        throw new LocalizedError(message("disableFailed"))
       }
 
       setProxyEnabledState(false)
       setFeedback({
         tone: "success",
-        text: "Proxy disabled."
+        text: message("proxyDisabled")
       })
     } catch (error) {
       setFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Failed to disable proxy."
+        text: getErrorFeedback(error, "disableFailed")
       })
     } finally {
       setIsBusy(false)
@@ -924,7 +1122,7 @@ function IndexPopup() {
       setFormState(nextFormState)
       setFeedback({
         tone: "success",
-        text: "Draft reset to defaults."
+        text: message("draftReset")
       })
       return
     }
@@ -948,7 +1146,8 @@ function IndexPopup() {
         })
 
         if (!response.ok) {
-          throw new Error(response.error ?? "Failed to re-apply defaults.")
+          if (response.error) throw new Error(response.error)
+          throw new LocalizedError(message("reapplyFailed"))
         }
       }
 
@@ -956,14 +1155,14 @@ function IndexPopup() {
         tone: "success",
         text:
           selectedStoredProfile.id === activeProfileId && proxyEnabled
-            ? "Defaults restored and applied."
-            : "Defaults restored."
+            ? message("defaultsApplied")
+            : message("defaultsRestored")
       })
     } catch (error) {
       setFeedback({
         tone: "error",
         text:
-          error instanceof Error ? error.message : "Failed to restore defaults."
+          getErrorFeedback(error, "resetFailed")
       })
     } finally {
       setIsBusy(false)
@@ -974,7 +1173,7 @@ function IndexPopup() {
     isProxyUrlImportVisible ? (
       <section style={urlImportPanelStyle}>
         <label style={{ display: "grid", gap: 6 }}>
-          <span style={{ fontSize: 12, fontWeight: 600 }}>Proxy URL</span>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>{t("proxyUrl")}</span>
           <input
             disabled={isLoading || isBusy}
             onChange={(event) => setProxyUrlText(event.target.value)}
@@ -1000,13 +1199,13 @@ function IndexPopup() {
             disabled={isLoading || isBusy}
             onClick={handleImportProxyUrl}
             style={primaryButtonStyle}>
-            Import URL
+            {t("importUrl")}
           </button>
           <button
             disabled={isLoading || isBusy}
             onClick={handleCancelProxyUrlImport}
             style={secondaryButtonStyle}>
-            Cancel
+            {t("cancel")}
           </button>
         </div>
       </section>
@@ -1029,7 +1228,7 @@ function IndexPopup() {
             fontWeight: 700,
             lineHeight: 1.2
           }}>
-          Create your first profile
+          {t("createFirstProfile")}
         </div>
         <div
           style={{
@@ -1037,12 +1236,12 @@ function IndexPopup() {
             color: "#5b6472",
             lineHeight: 1.45
           }}>
-          Each profile stores its own proxy host, credentials and domain lists.
+          {t("profileDescription")}
         </div>
       </header>
 
       <label style={{ display: "grid", gap: 6 }}>
-        <span style={{ fontSize: 12, fontWeight: 600 }}>Profile name</span>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{t("profileName")}</span>
         <input
           disabled={isLoading || isBusy}
           onChange={(event) => setNewProfileName(event.target.value)}
@@ -1055,21 +1254,21 @@ function IndexPopup() {
         disabled={isLoading || isBusy}
         onClick={() => startDraftProfile(newProfileName)}
         style={primaryButtonStyle}>
-        Add profile
+        {t("addProfile")}
       </button>
 
       <button
         disabled={isLoading || isBusy}
         onClick={handleOpenImportDialog}
         style={secondaryButtonStyle}>
-        Import profile
+        {t("importProfile")}
       </button>
 
       <button
         disabled={isLoading || isBusy}
         onClick={handleOpenProxyUrlImport}
         style={secondaryButtonStyle}>
-        Import from URL
+        {t("importFromUrl")}
       </button>
 
       {renderProxyUrlImport()}
@@ -1101,12 +1300,12 @@ function IndexPopup() {
             gap: 8
           }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: "#1f2937" }}>
-            {draft.profileName || "New profile"}
+            {draft.profileName || t("newProfile")}
           </span>
-          <span style={tagStyle("draft")}>Draft</span>
+          <span style={tagStyle("draft")}>{t("draft")}</span>
         </div>
         <span style={{ marginTop: 4, fontSize: 11, color: "#5b6472" }}>
-          Save or apply to add this profile to the list.
+          {t("draftHint")}
         </span>
       </button>
     )
@@ -1123,10 +1322,10 @@ function IndexPopup() {
         }}>
         <div>
           <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.2 }}>
-            Chrome Proxy Manager
+            {t("appName")}
           </div>
           <div style={{ marginTop: 4, fontSize: 12, color: "#5b6472" }}>
-            Select a profile to connect or edit
+            {t("selectProfile")}
           </div>
         </div>
 
@@ -1144,6 +1343,15 @@ function IndexPopup() {
           {statusLabel}
         </div>
       </header>
+
+      <button
+        disabled={isLoading || isPinging || profiles.length === 0}
+        onClick={() => void handlePingProfiles()}
+        style={secondaryButtonStyle}
+        title={t("pingHint")}
+        type="button">
+        {isPinging ? t("checkingServers") : t("pingServers")}
+      </button>
 
       <div
         style={{
@@ -1177,19 +1385,22 @@ function IndexPopup() {
                 </span>
                 {isActive ? (
                   <span style={tagStyle(proxyEnabled ? "live" : "active")}>
-                    {proxyEnabled ? "Live" : "Active"}
+                    {proxyEnabled ? t("live") : t("active")}
                   </span>
                 ) : null}
               </div>
-              <span
-                style={{
-                  marginTop: 4,
-                  fontSize: 11,
-                  color: "#5b6472",
-                  textAlign: "left"
-                }}>
-                {profile.proxyHost}:{profile.proxyPort}
-              </span>
+              <div style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                marginTop: 4
+              }}>
+                <span style={{ fontSize: 11, color: "#5b6472", textAlign: "left" }}>
+                  {getProfileEndpoint(profile)}
+                </span>
+                {renderPingResult(profile)}
+              </div>
             </button>
           )
         })}
@@ -1201,13 +1412,13 @@ function IndexPopup() {
           disabled={isLoading || isBusy}
           onClick={() => startDraftProfile()}
           style={primaryButtonStyle}>
-          Add profile
+          {t("addProfile")}
         </button>
         <button
           disabled={isLoading || isBusy}
           onClick={handleOpenImportDialog}
           style={secondaryButtonStyle}>
-          Import profile
+          {t("importProfile")}
         </button>
       </div>
 
@@ -1218,7 +1429,7 @@ function IndexPopup() {
           setIsProxyUrlImportVisible(true)
         }}
         style={secondaryButtonStyle}>
-        Import from URL
+        {t("importFromUrl")}
       </button>
     </div>
   )
@@ -1239,7 +1450,7 @@ function IndexPopup() {
         }}>
         <div>
           <button
-            aria-label="Back to profiles"
+            aria-label={t("backToProfiles")}
             disabled={isLoading || isBusy}
             onClick={handleBackToProfiles}
             style={{
@@ -1248,7 +1459,7 @@ function IndexPopup() {
               padding: "5px 8px"
             }}
             type="button">
-            ← Profiles
+            {t("backProfiles")}
           </button>
           <div
             style={{
@@ -1256,7 +1467,7 @@ function IndexPopup() {
               fontWeight: 700,
               lineHeight: 1.2
             }}>
-            Chrome Proxy Manager
+            {t("appName")}
           </div>
           <div
             style={{
@@ -1264,7 +1475,7 @@ function IndexPopup() {
               fontSize: 12,
               color: "#5b6472"
             }}>
-            Profiles keep separate PAC routes and credentials
+            {t("profilesHint")}
           </div>
         </div>
 
@@ -1304,7 +1515,7 @@ function IndexPopup() {
               fontWeight: 700,
               color: "#243244"
             }}>
-            Profiles
+            {t("profiles")}
           </div>
 
           <div
@@ -1318,28 +1529,37 @@ function IndexPopup() {
               disabled={isLoading || isBusy}
               onClick={handleOpenImportDialog}
               style={miniButtonStyle}>
-              Import
+              {t("import")}
             </button>
             <button
               disabled={isLoading || isBusy}
               onClick={handleExportProfile}
               style={miniButtonStyle}>
-              Export
+              {t("export")}
             </button>
             <button
               disabled={isLoading || isBusy}
               onClick={handleOpenProxyUrlImport}
               style={miniButtonStyle}>
-              From URL
+              {t("fromUrl")}
             </button>
             <button
               disabled={isLoading || isBusy}
               onClick={() => startDraftProfile()}
               style={miniButtonStyle}>
-              Add
+              {t("add")}
             </button>
           </div>
         </div>
+
+        <button
+          disabled={isLoading || isPinging || profiles.length === 0}
+          onClick={() => void handlePingProfiles()}
+          style={miniButtonStyle}
+          title={t("pingHint")}
+          type="button">
+          {isPinging ? t("checkingServers") : t("pingServers")}
+        </button>
 
         {renderProxyUrlImport()}
 
@@ -1381,19 +1601,22 @@ function IndexPopup() {
                   </span>
                   {isActive ? (
                     <span style={tagStyle(proxyEnabled ? "live" : "active")}>
-                      {proxyEnabled ? "Live" : "Active"}
+                      {proxyEnabled ? t("live") : t("active")}
                     </span>
                   ) : null}
                 </div>
-                <span
-                  style={{
-                    marginTop: 4,
-                    fontSize: 11,
-                    color: "#5b6472",
-                    textAlign: "left"
-                  }}>
-                  {profile.proxyHost}:{profile.proxyPort}
-                </span>
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  marginTop: 4
+                }}>
+                  <span style={{ fontSize: 11, color: "#5b6472", textAlign: "left" }}>
+                    {getProfileEndpoint(profile)}
+                  </span>
+                  {renderPingResult(profile)}
+                </div>
               </button>
             )
           })}
@@ -1409,8 +1632,48 @@ function IndexPopup() {
           ...primaryButtonStyle,
           backgroundColor: isSelectedProfileEnabled ? "#8a2d3b" : "#1d5f8c"
         }}>
-        {isSelectedProfileEnabled ? "Disable Proxy" : "Enable Proxy"}
+        {isSelectedProfileEnabled ? t("disableProxy") : t("enableProxy")}
       </button>
+
+      {selectedStoredProfile ? (
+        isDeleteConfirmationVisible ? (
+          <section
+            aria-labelledby="delete-profile-question"
+            role="group"
+            style={{ ...urlImportPanelStyle, borderColor: "#d8a4ac" }}>
+            <div id="delete-profile-question" style={{ fontSize: 13, lineHeight: 1.45 }}>
+              {t(isSelectedProfileEnabled ? "deleteActiveConfirmation" : "deleteConfirmation", {
+                name: selectedStoredProfile.name
+              })}
+            </div>
+            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+              <button
+                disabled={isBusy}
+                onClick={() => void handleDeleteProfile()}
+                style={{ ...primaryButtonStyle, backgroundColor: "#8a2d3b" }}
+                type="button">
+                {t("confirmDelete")}
+              </button>
+              <button
+                autoFocus
+                disabled={isBusy}
+                onClick={() => setIsDeleteConfirmationVisible(false)}
+                style={secondaryButtonStyle}
+                type="button">
+                {t("cancel")}
+              </button>
+            </div>
+          </section>
+        ) : (
+          <button
+            disabled={isLoading || isBusy}
+            onClick={() => setIsDeleteConfirmationVisible(true)}
+            style={{ ...secondaryButtonStyle, color: "#8a2d3b" }}
+            type="button">
+            {t("deleteProfile")}
+          </button>
+        )
+      ) : null}
 
       <section
         style={{
@@ -1418,7 +1681,7 @@ function IndexPopup() {
           gap: 12
         }}>
         <label style={{ display: "grid", gap: 6 }}>
-          <span style={{ fontSize: 12, fontWeight: 600 }}>Profile name</span>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>{t("profileName")}</span>
           <input
             disabled={isLoading || isBusy}
             onChange={updateField("profileName")}
@@ -1434,7 +1697,7 @@ function IndexPopup() {
             gridTemplateColumns: "minmax(0, 1fr) 112px"
           }}>
           <label style={{ display: "grid", gap: 6 }}>
-            <span style={{ fontSize: 12, fontWeight: 600 }}>Proxy host</span>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>{t("proxyHost")}</span>
             <input
               disabled={isLoading || isBusy}
               onChange={updateField("proxyHost")}
@@ -1444,7 +1707,7 @@ function IndexPopup() {
           </label>
 
           <label style={{ display: "grid", gap: 6 }}>
-            <span style={{ fontSize: 12, fontWeight: 600 }}>Proxy port</span>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>{t("proxyPort")}</span>
             <input
               disabled={isLoading || isBusy}
               inputMode="numeric"
@@ -1456,7 +1719,7 @@ function IndexPopup() {
         </div>
 
         <label style={{ display: "grid", gap: 6 }}>
-          <span style={{ fontSize: 12, fontWeight: 600 }}>Username</span>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>{t("username")}</span>
           <input
             disabled={isLoading || isBusy}
             onChange={updateField("username")}
@@ -1466,7 +1729,7 @@ function IndexPopup() {
         </label>
 
         <label style={{ display: "grid", gap: 6 }}>
-          <span style={{ fontSize: 12, fontWeight: 600 }}>Password</span>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>{t("password")}</span>
           <input
             disabled={isLoading || isBusy}
             onChange={updateField("password")}
@@ -1498,12 +1761,12 @@ function IndexPopup() {
                 gap: 2
               }}>
               <span style={{ fontSize: 12, fontWeight: 700 }}>
-                Domain list routing
+                {t("domainRouting")}
               </span>
               <span style={{ fontSize: 11, color: "#5b6472" }}>
                 {formState.disableProxyDomainRouting
-                  ? "Disabled: proxy is used globally"
-                  : "Enabled: proxy uses the domain list"}
+                  ? t("globalRoutingHint")
+                  : t("listRoutingHint")}
               </span>
             </div>
 
@@ -1523,7 +1786,7 @@ function IndexPopup() {
                   ? "#8a5d12"
                   : "#24405f"
               }}>
-              {formState.disableProxyDomainRouting ? "Enable list" : "Disable list"}
+              {formState.disableProxyDomainRouting ? t("enableList") : t("disableList")}
             </button>
           </div>
         </section>
@@ -1538,13 +1801,13 @@ function IndexPopup() {
               fontSize: 12,
               fontWeight: 600
             }}>
-            Domains via proxy
+            {t("proxyDomains")}
             <button
               disabled={isLoading || isBusy}
               onClick={() => void handleAddCurrentSite()}
               style={miniButtonStyle}
               type="button">
-              Add current site
+              {t("addCurrentSite")}
             </button>
           </span>
           <textarea
@@ -1558,7 +1821,7 @@ function IndexPopup() {
 
         <label style={{ display: "grid", gap: 6 }}>
           <span style={{ fontSize: 12, fontWeight: 600 }}>
-            Domains always direct
+            {t("directDomains")}
           </span>
           <textarea
             disabled={isLoading || isBusy}
@@ -1575,33 +1838,33 @@ function IndexPopup() {
           display: "grid",
           gap: 8,
           gridTemplateColumns: isDraftProfile
-            ? "repeat(4, minmax(0, 1fr))"
+            ? "repeat(2, minmax(0, 1fr))"
             : "repeat(3, minmax(0, 1fr))"
         }}>
         <button
           disabled={isLoading || isBusy}
           onClick={() => void handleSave()}
           style={secondaryButtonStyle}>
-          Save
+          {t("save")}
         </button>
         <button
           disabled={isLoading || isBusy}
           onClick={() => void handleApply()}
           style={primaryButtonStyle}>
-          Apply
+          {t("apply")}
         </button>
         <button
           disabled={isLoading || isBusy}
           onClick={() => void handleResetToDefaults()}
           style={secondaryButtonStyle}>
-          Reset
+          {t("reset")}
         </button>
         {isDraftProfile ? (
           <button
             disabled={isLoading || isBusy}
             onClick={() => void handleDiscardDraft()}
             style={secondaryButtonStyle}>
-            Discard
+            {t("discard")}
           </button>
         ) : null}
       </div>
@@ -1619,8 +1882,26 @@ function IndexPopup() {
         color: "#1f2937",
         fontFamily: "\"Segoe UI\", Tahoma, sans-serif"
       }}>
+      <label style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "flex-end",
+        gap: 8,
+        marginBottom: 14,
+        fontSize: 12
+      }}>
+        <span>{t("language")}</span>
+        <select
+          disabled={isLoading || isChangingLanguage}
+          onChange={(event) => void handleLanguageChange(event.target.value as Language)}
+          style={{ ...inputStyle, width: "auto", padding: "6px 8px" }}
+          value={i18n.resolvedLanguage ?? "en"}>
+          <option lang="ru" value="ru">Русский</option>
+          <option lang="en" value="en">English</option>
+        </select>
+      </label>
       {isLoading ? (
-        <div style={{ fontSize: 12, color: "#5b6472" }}>Loading settings...</div>
+        <div style={{ fontSize: 12, color: "#5b6472" }}>{t("loading")}</div>
       ) : !hasProfiles && !draftFormState && !isDraftProfile ? (
         renderOnboarding()
       ) : isProfileListVisible ? (
@@ -1638,6 +1919,7 @@ function IndexPopup() {
       />
 
       <div
+        role="status"
         style={{
           minHeight: 20,
           marginTop: 14,
@@ -1649,7 +1931,7 @@ function IndexPopup() {
                 ? "#166534"
                 : "#5b6472"
         }}>
-        {isBusy ? "Working..." : feedback?.text ?? "Ready."}
+        {isBusy ? t("working") : feedback ? translateMessage(feedback.text) : t("ready")}
       </div>
     </div>
   )

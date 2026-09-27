@@ -1,5 +1,5 @@
-import { LOCAL_DIRECT_PATTERNS } from "~src/defaultSettings"
-import type { ProxySettings } from "~src/types"
+import { LOCAL_DIRECT_PATTERNS } from "./defaultSettings"
+import type { ProxySettings } from "./types"
 
 export const generatePacScript = (settings: ProxySettings) => {
   const proxyEndpoint = `PROXY ${settings.proxyHost}:${settings.proxyPort}`

@@ -2,20 +2,21 @@ import {
   DEFAULT_PROFILE_NAME,
   DEFAULT_PROXY_ENABLED,
   DEFAULT_SETTINGS
-} from "~src/defaultSettings"
+} from "./defaultSettings"
 import type {
   PopupDraftState,
   PopupFormState,
   ProfilesState,
   ProxyProfile,
   ProxySettings
-} from "~src/types"
+} from "./types"
 
 const PROFILES_KEY = "proxyProfiles"
 const ACTIVE_PROFILE_ID_KEY = "activeProfileId"
 const LEGACY_SETTINGS_KEY = "proxySettings"
 const ENABLED_KEY = "proxyEnabled"
 const PROFILE_DRAFT_KEY = "profileDraft"
+const LANGUAGE_KEY = "language"
 
 const getLastError = () => chrome.runtime.lastError?.message
 
@@ -285,11 +286,13 @@ export const getProfilesState = async (): Promise<ProfilesState> => {
     }
   }
 
-  if (profiles.length > 0) {
+  const firstProfile = profiles[0]
+
+  if (firstProfile) {
     const hasActiveProfile = profiles.some((profile) => profile.id === activeProfileId)
 
     if (!hasActiveProfile) {
-      activeProfileId = profiles[0].id
+      activeProfileId = firstProfile.id
       shouldPersist = true
     }
   } else if (activeProfileId !== null) {
@@ -363,9 +366,10 @@ export const saveProfile = async (profile: ProxyProfile) => {
     ({ id }) => id === normalizedProfile.id
   )
   const nextProfiles = [...state.profiles]
+  const existingProfile = nextProfiles[existingIndex]
 
-  if (existingIndex >= 0) {
-    nextProfile.createdAt = nextProfiles[existingIndex].createdAt
+  if (existingProfile) {
+    nextProfile.createdAt = existingProfile.createdAt
     nextProfiles[existingIndex] = nextProfile
   } else {
     nextProfiles.push(nextProfile)
@@ -387,6 +391,23 @@ export const getProxyEnabled = async () => {
   })
 
   return Boolean(stored[ENABLED_KEY])
+}
+
+export const deleteProfile = async (profileId: string) => {
+  const state = await getProfilesState()
+  const profiles = state.profiles.filter(({ id }) => id !== profileId)
+  const removedActiveProfile = state.activeProfileId === profileId
+  const activeProfileId = removedActiveProfile
+    ? profiles[0]?.id ?? null
+    : state.activeProfileId
+
+  await storageSet({
+    [PROFILES_KEY]: profiles,
+    [ACTIVE_PROFILE_ID_KEY]: activeProfileId,
+    ...(removedActiveProfile ? { [ENABLED_KEY]: false } : {})
+  })
+
+  return { profiles, activeProfileId }
 }
 
 export const setProxyEnabled = async (enabled: boolean) => {
@@ -428,4 +449,13 @@ export const setProfileDraft = async (formState: PopupFormState) => {
 
 export const clearProfileDraft = async () => {
   await storageRemove(PROFILE_DRAFT_KEY)
+}
+
+export const getPreferredLanguage = async (): Promise<"en" | "ru" | null> => {
+  const stored = await storageGet<{ language?: unknown }>({ [LANGUAGE_KEY]: null })
+  return stored.language === "en" || stored.language === "ru" ? stored.language : null
+}
+
+export const setPreferredLanguage = async (language: "en" | "ru") => {
+  await storageSet({ [LANGUAGE_KEY]: language })
 }
