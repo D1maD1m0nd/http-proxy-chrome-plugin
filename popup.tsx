@@ -393,12 +393,14 @@ function IndexPopup() {
     })
   )
   const [newProfileName, setNewProfileName] = useState(getNextProfileName(0))
+  const [draftFormState, setDraftFormState] = useState<PopupFormState | null>(null)
   const [proxyEnabled, setProxyEnabledState] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isBusy, setIsBusy] = useState(false)
   const [feedback, setFeedback] = useState<FeedbackState>()
   const [isProxyUrlImportVisible, setIsProxyUrlImportVisible] = useState(false)
   const [proxyUrlText, setProxyUrlText] = useState("")
+  const [isProfileListVisible, setIsProfileListVisible] = useState(true)
 
   useEffect(() => {
     let isMounted = true
@@ -415,8 +417,10 @@ function IndexPopup() {
         setNewProfileName(getNextProfileName(profilesState.profiles.length))
 
         if (profileDraft) {
+          setDraftFormState(profileDraft.formState)
           setSelectedProfileId(NEW_PROFILE_ID)
           setFormState(profileDraft.formState)
+          setIsProfileListVisible(false)
           setFeedback({
             tone: "success",
             text: "Unsaved profile draft restored."
@@ -459,10 +463,13 @@ function IndexPopup() {
       return
     }
 
+    setDraftFormState(formState)
     void setProfileDraft(formState).catch(() => undefined)
   }, [formState, isLoading, selectedProfileId])
 
   const isDraftProfile = selectedProfileId === NEW_PROFILE_ID
+  const isSelectedProfileEnabled =
+    proxyEnabled && selectedProfileId === activeProfileId && !isDraftProfile
   const hasProfiles = profiles.length > 0
   const selectedStoredProfile =
     selectedProfileId && !isDraftProfile
@@ -622,10 +629,10 @@ function IndexPopup() {
       const nextProfiles = upsertProfileList(profiles, savedProfile)
       const nextActiveProfileId = activeProfileId ?? nextProfiles[0]?.id ?? null
 
-      await clearProfileDraft()
       setProfiles(nextProfiles)
       setSelectedProfileId(savedProfile.id)
       setFormState(createFormState(savedProfile))
+      setIsProfileListVisible(false)
       setActiveProfileIdState(nextActiveProfileId)
       setNewProfileName(getNextProfileName(nextProfiles.length))
       setIsProxyUrlImportVisible(false)
@@ -650,6 +657,7 @@ function IndexPopup() {
 
     try {
       await clearProfileDraft()
+      setDraftFormState(null)
 
       const nextProfile =
         profiles.find(({ id }) => id === activeProfileId) ?? profiles[0] ?? null
@@ -684,13 +692,15 @@ function IndexPopup() {
 
   const startDraftProfile = (preferredName?: string) => {
     const draftName = (preferredName ?? newProfileName).trim() || newProfileName
-    const nextFormState = createFormState({
+    const nextFormState = draftFormState ?? createFormState({
       name: draftName,
       ...DEFAULT_SETTINGS
     })
 
+    setDraftFormState(nextFormState)
     setSelectedProfileId(NEW_PROFILE_ID)
     setFormState(nextFormState)
+    setIsProfileListVisible(false)
     setFeedback(undefined)
     setIsProxyUrlImportVisible(false)
     setProxyUrlText("")
@@ -700,9 +710,17 @@ function IndexPopup() {
   const selectProfile = (profile: ProxyProfile) => {
     setSelectedProfileId(profile.id)
     setFormState(createFormState(profile))
+    setIsProfileListVisible(false)
     setFeedback(undefined)
     setIsProxyUrlImportVisible(false)
     setProxyUrlText("")
+  }
+
+  const handleBackToProfiles = () => {
+    setIsProfileListVisible(true)
+    setIsProxyUrlImportVisible(false)
+    setProxyUrlText("")
+    setFeedback(undefined)
   }
 
   const persistCurrentProfile = async (options: {
@@ -739,6 +757,7 @@ function IndexPopup() {
 
     if (wasDraftProfile) {
       await clearProfileDraft()
+      setDraftFormState(null)
     }
 
     setProfiles(nextProfiles)
@@ -818,7 +837,7 @@ function IndexPopup() {
   }
 
   const handleToggleProxy = async () => {
-    const nextEnabled = !proxyEnabled
+    const nextEnabled = !isSelectedProfileEnabled
 
     if (nextEnabled) {
       setIsBusy(true)
@@ -853,7 +872,13 @@ function IndexPopup() {
           tone: "error",
           text: error instanceof Error ? error.message : "Failed to enable proxy."
         })
-        await setProxyEnabled(false).catch(() => undefined)
+        // A failed switch must not turn off the previously connected profile.
+        await setActiveProfileId(activeProfileId).catch(() => undefined)
+        await setProxyEnabled(proxyEnabled).catch(() => undefined)
+        setActiveProfileIdState(activeProfileId)
+        await sendBackgroundMessage({ type: "SYNC_PROXY_STATE" }).catch(
+          () => undefined
+        )
       } finally {
         setIsBusy(false)
       }
@@ -1051,6 +1076,153 @@ function IndexPopup() {
     </div>
   )
 
+  const renderDraftProfile = () => {
+    const draft = isDraftProfile ? formState : draftFormState
+
+    if (!draft) {
+      return null
+    }
+
+    return (
+      <button
+        disabled={isLoading || isBusy}
+        onClick={() => startDraftProfile()}
+        style={{
+          ...profileButtonStyle,
+          borderColor: isDraftProfile ? "#1d5f8c" : "#c9d2dc",
+          backgroundColor: isDraftProfile ? "#f5f9fc" : "#fbfaf7"
+        }}
+        type="button">
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8
+          }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#1f2937" }}>
+            {draft.profileName || "New profile"}
+          </span>
+          <span style={tagStyle("draft")}>Draft</span>
+        </div>
+        <span style={{ marginTop: 4, fontSize: 11, color: "#5b6472" }}>
+          Save or apply to add this profile to the list.
+        </span>
+      </button>
+    )
+  }
+
+  const renderProfileList = () => (
+    <div style={{ display: "grid", gap: 14 }}>
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12
+        }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.2 }}>
+            Chrome Proxy Manager
+          </div>
+          <div style={{ marginTop: 4, fontSize: 12, color: "#5b6472" }}>
+            Select a profile to connect or edit
+          </div>
+        </div>
+
+        <div
+          style={{
+            padding: "6px 10px",
+            borderRadius: 999,
+            backgroundColor: proxyEnabled ? "#d6f5df" : "#e3e7ee",
+            color: proxyEnabled ? "#155e3b" : "#465061",
+            fontSize: 12,
+            fontWeight: 700,
+            minWidth: 88,
+            textAlign: "center"
+          }}>
+          {statusLabel}
+        </div>
+      </header>
+
+      <div
+        style={{
+          display: "grid",
+          gap: 8,
+          maxHeight: 460,
+          overflowY: "auto"
+        }}>
+        {profiles.map((profile) => {
+          const isActive = profile.id === activeProfileId
+
+          return (
+            <button
+              key={profile.id}
+              disabled={isBusy}
+              onClick={() => selectProfile(profile)}
+              style={{
+                ...profileButtonStyle,
+                borderColor: isActive ? "#1d5f8c" : "#c9d2dc",
+                backgroundColor: isActive ? "#f5f9fc" : "#fbfaf7"
+              }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8
+                }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#1f2937" }}>
+                  {profile.name}
+                </span>
+                {isActive ? (
+                  <span style={tagStyle(proxyEnabled ? "live" : "active")}>
+                    {proxyEnabled ? "Live" : "Active"}
+                  </span>
+                ) : null}
+              </div>
+              <span
+                style={{
+                  marginTop: 4,
+                  fontSize: 11,
+                  color: "#5b6472",
+                  textAlign: "left"
+                }}>
+                {profile.proxyHost}:{profile.proxyPort}
+              </span>
+            </button>
+          )
+        })}
+        {renderDraftProfile()}
+      </div>
+
+      <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+        <button
+          disabled={isLoading || isBusy}
+          onClick={() => startDraftProfile()}
+          style={primaryButtonStyle}>
+          Add profile
+        </button>
+        <button
+          disabled={isLoading || isBusy}
+          onClick={handleOpenImportDialog}
+          style={secondaryButtonStyle}>
+          Import profile
+        </button>
+      </div>
+
+      <button
+        disabled={isLoading || isBusy}
+        onClick={() => {
+          startDraftProfile()
+          setIsProxyUrlImportVisible(true)
+        }}
+        style={secondaryButtonStyle}>
+        Import from URL
+      </button>
+    </div>
+  )
+
   const renderEditor = () => (
     <div
       style={{
@@ -1066,6 +1238,18 @@ function IndexPopup() {
           paddingBottom: 2
         }}>
         <div>
+          <button
+            aria-label="Back to profiles"
+            disabled={isLoading || isBusy}
+            onClick={handleBackToProfiles}
+            style={{
+              ...miniButtonStyle,
+              marginBottom: 8,
+              padding: "5px 8px"
+            }}
+            type="button">
+            ← Profiles
+          </button>
           <div
             style={{
               fontSize: 18,
@@ -1214,41 +1398,7 @@ function IndexPopup() {
             )
           })}
 
-          {isDraftProfile ? (
-            <div
-              style={{
-                ...profileButtonStyle,
-                borderColor: "#1d5f8c",
-                backgroundColor: "#f5f9fc"
-              }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8
-                }}>
-                <span
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 700,
-                    color: "#1f2937"
-                  }}>
-                  {formState.profileName || "New profile"}
-                </span>
-                <span style={tagStyle("draft")}>Draft</span>
-              </div>
-              <span
-                style={{
-                  marginTop: 4,
-                  fontSize: 11,
-                  color: "#5b6472",
-                  textAlign: "left"
-                }}>
-                Save or apply to add this profile to the list.
-              </span>
-            </div>
-          ) : null}
+          {renderDraftProfile()}
         </div>
       </section>
 
@@ -1257,9 +1407,9 @@ function IndexPopup() {
         onClick={() => void handleToggleProxy()}
         style={{
           ...primaryButtonStyle,
-          backgroundColor: proxyEnabled ? "#8a2d3b" : "#1d5f8c"
+          backgroundColor: isSelectedProfileEnabled ? "#8a2d3b" : "#1d5f8c"
         }}>
-        {proxyEnabled ? "Disable Proxy" : "Enable Proxy"}
+        {isSelectedProfileEnabled ? "Disable Proxy" : "Enable Proxy"}
       </button>
 
       <section
@@ -1471,8 +1621,10 @@ function IndexPopup() {
       }}>
       {isLoading ? (
         <div style={{ fontSize: 12, color: "#5b6472" }}>Loading settings...</div>
-      ) : !hasProfiles && !isDraftProfile ? (
+      ) : !hasProfiles && !draftFormState && !isDraftProfile ? (
         renderOnboarding()
+      ) : isProfileListVisible ? (
+        renderProfileList()
       ) : (
         renderEditor()
       )}

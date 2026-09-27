@@ -9,7 +9,8 @@
     "dev": "plasmo dev --src-path=.",
     "build": "plasmo build --src-path=.",
     "package": "plasmo package --src-path=.",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "tsx --tsconfig tests/tsconfig.json --test tests/*.test.tsx"
   },
   "dependencies": {
     "plasmo": "0.90.5",
@@ -21,6 +22,9 @@
     "@types/node": "20.11.5",
     "@types/react": "18.2.48",
     "@types/react-dom": "18.2.18",
+    "@types/react-test-renderer": "18.0.7",
+    "react-test-renderer": "18.2.0",
+    "tsx": "4.20.5",
     "typescript": "5.3.3"
   },
   "manifest": {
